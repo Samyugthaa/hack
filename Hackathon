@@ -1,0 +1,140 @@
+import cv2
+import sqlite3
+import numpy as np
+from flask import Flask, request, jsonify, render_template
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
+
+app = Flask(__name__)
+
+# Initialize SQLite database
+def init_db():
+    conn = sqlite3.connect('patients.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS patients (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        age INTEGER,
+                        dob TEXT,
+                        address TEXT,
+                        phone TEXT,
+                        blood_group TEXT,
+                        health_conditions TEXT,
+                        fingerprint BLOB,
+                        face_data BLOB,
+                        email TEXT)''')
+    conn.commit()
+    conn.close()
+
+# Add patient data to the database
+@app.route('/add_patient', methods=['POST'])
+def add_patient():
+    data = request.form
+    face_image = request.files['face_image'].read()  # Face image uploaded as file
+    fingerprint = request.files['fingerprint'].read()  # Fingerprint uploaded as file
+
+    conn = sqlite3.connect('patients.db')
+    cursor = conn.cursor()
+    cursor.execute('''INSERT INTO patients (name, age, dob, address, phone, blood_group, health_conditions, fingerprint, face_data, email)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                   (data['name'], data['age'], data['dob'], data['address'], data['phone'],
+                    data['blood_group'], data['health_conditions'], fingerprint, face_image, data['email']))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Patient added successfully!'})
+
+# Search for a patient by fingerprint or face
+@app.route('/search_patient', methods=['POST'])
+def search_patient():
+    data = request.files
+    search_type = request.form.get('type')  # "fingerprint" or "face"
+    input_data = data['input_data'].read()
+
+    conn = sqlite3.connect('patients.db')
+    cursor = conn.cursor()
+
+    if search_type == 'fingerprint':
+        cursor.execute('SELECT * FROM patients')
+        patients = cursor.fetchall()
+        for patient in patients:
+            if patient[8] == input_data:  # Compare fingerprint binary data
+                return jsonify({'patient': patient})
+        return jsonify({'message': 'Patient not found!'})
+
+    elif search_type == 'face':
+        cursor.execute('SELECT * FROM patients')
+        patients = cursor.fetchall()
+        input_image = np.frombuffer(input_data, np.uint8)
+        input_image = cv2.imdecode(input_image, cv2.IMREAD_COLOR)
+
+        for patient in patients:
+            stored_face = np.frombuffer(patient[9], np.uint8)
+            stored_face = cv2.imdecode(stored_face, cv2.IMREAD_COLOR)
+
+            # Simple face match using OpenCV
+            if stored_face.shape == input_image.shape and not (stored_face - input_image).any():
+                return jsonify({'patient': patient})
+
+        return jsonify({'message': 'Patient not found!'})
+
+# Update patient details
+@app.route('/update_patient/<int:patient_id>', methods=['POST'])
+def update_patient(patient_id):
+    data = request.form
+    conn = sqlite3.connect('patients.db')
+    cursor = conn.cursor()
+    cursor.execute('''UPDATE patients
+                      SET name = ?, age = ?, dob = ?, address = ?, phone = ?, blood_group = ?, health_conditions = ?, email = ?
+                      WHERE id = ?''',
+                   (data['name'], data['age'], data['dob'], data['address'], data['phone'],
+                    data['blood_group'], data['health_conditions'], data['email'], patient_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Patient updated successfully!'})
+
+# Send reminders to patients via email
+@app.route('/send_reminders', methods=['GET'])
+def send_reminders():
+    conn = sqlite3.connect('patients.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT name, email FROM patients')
+    patients = cursor.fetchall()
+    conn.close()
+
+    for patient in patients:
+        name, email = patient
+        if email:
+            send_email(email, f"Hello {name}, please schedule your next health checkup!")
+
+    return jsonify({'message': 'Reminders sent!'})
+
+def send_email(recipient_email, message_body):
+    sender_email = "your_email@gmail.com"  # Replace with your email
+    sender_password = "your_password"  # Replace with your email password
+
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = recipient_email
+    msg['Subject'] = "Health Checkup Reminder"
+
+    msg.attach(MIMEText(message_body, 'plain'))
+
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+# Home page
+@app.route('/')
+def home():
+    return render_template('index.html')  # Basic search and patient management UI
+
+# Initialize database and run Flask app
+if __name__ == '__main__':
+    init_db()
+    app.run(debug=True)
